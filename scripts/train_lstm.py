@@ -1,0 +1,211 @@
+"""
+Trains the DKT (Deep Knowledge Tracing) LSTM on logged student
+interactions.
+
+Data reality check: DKT-style models are normally trained on thousands of
+students and tens of thousands of interactions (the original paper used
+~4,000 students). With a small pilot, this script will run and produce a
+model, but treat its predictions as experimental rather than authoritative
+until real usage data accumulates. This is exactly why
+sequence_tracker.py falls back to the simpler EMA tracker below a minimum
+interaction count, rather than trusting an undertrained LSTM blindly.
+
+Usage:
+    python scripts/train_lstm.py
+"""
+
+from __future__ import annotations
+
+import logging
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+
+from common.config import DATA_PROCESSED_DIR, configure_logging
+from personalization_layer.database import get_session
+from personalization_layer.lstm_model import DKTModel
+from personalization_layer.models import InteractionLog, Student
+from personalization_layer.topic_vocab import TopicVocab
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+_MODEL_PATH = DATA_PROCESSED_DIR / "dkt_model.pt"
+_EPOCHS = 20
+_HIDDEN_SIZE = 64
+_LEARNING_RATE = 1e-3
+
+
+def _load_all_sequences() -> tuple[list[list[tuple[str, str, bool]]], TopicVocab]:
+    vocab = TopicVocab()
+    sequences = []
+
+    with get_session() as session:
+        student_ids = [s.id for s in session.query(Student).all()]
+
+        for student_id in student_ids:
+            rows = (
+                session.query(InteractionLog)
+                .filter_by(student_id=student_id)
+                .order_by(InteractionLog.created_at.asc())
+                .all()
+            )
+
+            sequence = [(r.subject, r.topic, r.correct) for r in rows]
+
+            for subject, topic, _ in sequence:
+                vocab.index_for(subject, topic, create_if_missing=True)
+
+            if len(sequence) >= 2:
+                sequences.append(sequence)
+
+    vocab.save()
+    return sequences, vocab
+
+
+class InteractionSequenceDataset(Dataset):
+    """Each item is one student's full interaction sequence, encoded as
+    (input, target) pairs: DKT predicts the NEXT interaction's correctness
+    from everything seen so far.
+    """
+
+    def __init__(
+        self,
+        sequences: list[list[tuple[str, str, bool]]],
+        vocab: TopicVocab,
+    ):
+        self.sequences = sequences
+        self.vocab = vocab
+        self.num_topics = len(vocab)
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int):
+        sequence = self.sequences[idx]
+
+        input_steps, target_indices, target_correct = [], [], []
+
+        for subject, topic, correct in sequence[:-1]:
+            index = self.vocab.index_for(
+                subject,
+                topic,
+                create_if_missing=False,
+            )
+
+            vec = torch.zeros(self.num_topics * 2)
+            vec[index if correct else self.num_topics + index] = 1.0
+            input_steps.append(vec)
+
+        for subject, topic, correct in sequence[1:]:
+            index = self.vocab.index_for(
+                subject,
+                topic,
+                create_if_missing=False,
+            )
+
+            target_indices.append(index)
+            target_correct.append(1.0 if correct else 0.0)
+
+        return (
+            torch.stack(input_steps),
+            torch.tensor(target_indices),
+            torch.tensor(target_correct),
+        )
+
+
+def _collate(batch):
+    # Sequence length varies per student, and loss is computed per-sample
+    # below, so no padding is needed — batch size is kept at 1, which is
+    # perfectly fine at pilot scale (a few dozen students at most).
+    return batch[0]
+
+
+def main() -> None:
+    sequences, vocab = _load_all_sequences()
+
+    if not sequences:
+        logger.warning(
+            "No logged interactions found — have students used the system yet? "
+            "Nothing to train on."
+        )
+        return
+
+    logger.info(
+        "Training on %d student sequences across %d topics.",
+        len(sequences),
+        len(vocab),
+    )
+
+    dataset = InteractionSequenceDataset(sequences, vocab)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        collate_fn=_collate,
+    )
+
+    model = DKTModel(
+        num_topics=len(vocab),
+        hidden_size=_HIDDEN_SIZE,
+    )
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=_LEARNING_RATE,
+    )
+
+    loss_fn = nn.BCELoss()
+
+    model.train()
+
+    for epoch in range(1, _EPOCHS + 1):
+        total_loss = 0.0
+
+        for inputs, target_indices, target_correct in loader:
+            if inputs.shape[0] == 0:
+                continue
+
+            optimizer.zero_grad()
+
+            predictions = model(inputs.unsqueeze(0))[0]
+
+            predicted_for_target = predictions[
+                torch.arange(len(target_indices)),
+                target_indices,
+            ]
+
+            loss = loss_fn(
+                predicted_for_target,
+                target_correct,
+            )
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        logger.info(
+            "Epoch %d/%d — loss: %.4f",
+            epoch,
+            _EPOCHS,
+            total_loss / max(len(loader), 1),
+        )
+
+    _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save(
+        model.state_dict(),
+        _MODEL_PATH,
+    )
+
+    logger.info(
+        "Model saved to %s",
+        _MODEL_PATH,
+    )
+
+
+if __name__ == "__main__":
+    main()

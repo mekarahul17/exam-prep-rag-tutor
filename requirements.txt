@@ -1,0 +1,13 @@
+mcp<2
+google-genai
+chromadb
+sentence-transformers
+pypdf
+pytesseract
+pillow
+sqlalchemy>=2.0
+fastapi
+uvicorn
+python-dotenv
+pytest
+torch

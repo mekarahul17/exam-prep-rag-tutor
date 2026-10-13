@@ -1,0 +1,55 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Exclude original NCERT datasets
+data/raw/ncert/
+
+# Exclude generated vector database
+data/processed/vector_store/
+
+# IDE
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Build files
+build/
+dist/
+
+# Node.js dependencies
+node_modules/
+
+# Frontend build output
+frontend/dist/
+client/dist/
