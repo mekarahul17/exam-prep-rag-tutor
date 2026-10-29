@@ -24,6 +24,7 @@ def call_gemini(
     prompt: str,
     system: str | None = None,
     max_tokens: int = 2048,
+    response_mime_type: str | None = None,
 ) -> str:
 
     from google.genai import types
@@ -36,13 +37,18 @@ def call_gemini(
             f"USER REQUEST:\n{prompt}"
         )
 
+    config = {
+        "temperature": 0.3,
+        "max_output_tokens": max_tokens,
+    }
+
+    if response_mime_type:
+        config["response_mime_type"] = response_mime_type
+
     response = _get_client().models.generate_content(
         model=GEMINI_MODEL,
         contents=full_prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=max_tokens,
-        ),
+        config=types.GenerateContentConfig(**config),
     )
 
     answer = response.text

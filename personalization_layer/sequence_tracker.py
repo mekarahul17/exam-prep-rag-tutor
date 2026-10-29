@@ -2,77 +2,115 @@
 """
 Sequence-aware mastery tracker using Deep Knowledge Tracing (DKT).
 
-Loads the trained LSTM + persisted topic vocabulary, converts a student's
-interaction history into one-hot (topic, correctness) vectors, and predicts
-mastery for every topic. Falls back to the original EMA tracker when there
-are fewer than MIN_INTERACTIONS_FOR_LSTM interactions or no trained model.
+Reads student interaction history from MongoDB Atlas and uses the
+trained LSTM model to predict topic mastery.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import torch
 
 from common.config import DATA_PROCESSED_DIR, WEAK_TOPIC_THRESHOLD
-from personalization_layer.database import get_session
+from personalization_layer.mongodb import interaction_logs_collection
 from personalization_layer.lstm_model import DKTModel
-from personalization_layer.models import InteractionLog
 from personalization_layer.topic_vocab import TopicVocab
 from personalization_layer.tracker import get_weak_topics
 
 _MODEL_PATH = Path(DATA_PROCESSED_DIR) / "dkt_model.pt"
 _MIN_INTERACTIONS_FOR_LSTM = 20
 
+_GENERIC_TOPIC_NAMES = {
+    "science",
+    "math",
+    "maths",
+    "mathematics",
+    "general",
+    "general science",
+    "general mathematics",
+    "unknown",
+    "other",
+    "others",
+}
+
+
+def _normalize(value: str) -> str:
+    """Normalize subject/topic labels for consistent comparison."""
+    return re.sub(r"[\s_-]+", " ", str(value).strip().lower())
+
+
+def _is_valid_topic(topic: str) -> bool:
+    """Reject empty or generic topic labels."""
+    normalized = _normalize(topic)
+
+    return bool(normalized) and normalized not in _GENERIC_TOPIC_NAMES
+
 
 def _load_model_and_vocab():
-    """Load the trained DKT model and vocabulary, or return None."""
     vocab = TopicVocab()
 
     if len(vocab) == 0 or not _MODEL_PATH.exists():
         return None
 
-    checkpoint = torch.load(_MODEL_PATH, map_location="cpu")
+    try:
+        checkpoint = torch.load(
+            _MODEL_PATH,
+            map_location="cpu",
+            weights_only=True,
+        )
 
-    num_topics = len(vocab)
-    model = DKTModel(num_topics=num_topics)
+        num_topics = len(vocab)
+        model = DKTModel(num_topics=num_topics)
 
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            model.load_state_dict(checkpoint)
 
-    model.eval()
+        model.eval()
 
-    return model, vocab
+        return model, vocab
+
+    except (RuntimeError, ValueError, KeyError, TypeError) as error:
+        print(f"DKT model could not be loaded: {error}")
+        return None
 
 
 def _get_interactions(student_id: str):
-    """Return the student's interaction history in chronological order."""
-    with get_session() as session:
-        rows = (
-            session.query(InteractionLog)
-            .filter(InteractionLog.student_id == student_id)
-            .order_by(InteractionLog.created_at.asc())
-            .all()
-        )
+    rows = interaction_logs_collection.find(
+        {"student_id": student_id},
+        {
+            "_id": 0,
+            "subject": 1,
+            "topic": 1,
+            "correct": 1,
+            "created_at": 1,
+        },
+    ).sort("created_at", 1)
 
-        return [
-            {
-                "subject": row.subject,
-                "topic": row.topic,
-                "correct": row.correct,
-            }
-            for row in rows
-        ]
+    return [
+        {
+            "subject": row["subject"],
+            "topic": row["topic"],
+            "correct": row["correct"],
+        }
+        for row in rows
+        if row.get("subject")
+        and row.get("topic")
+        and isinstance(row.get("correct"), bool)
+    ]
 
 
 def _encode_interactions(interactions, vocab: TopicVocab):
-    """Convert interactions into one-hot DKT input vectors."""
     num_topics = len(vocab)
     sequence = []
 
     for interaction in interactions:
+        if not _is_valid_topic(interaction["topic"]):
+            continue
+
         idx = vocab.index_for(
             interaction["subject"],
             interaction["topic"],
@@ -97,54 +135,76 @@ def _encode_interactions(interactions, vocab: TopicVocab):
     return torch.stack(sequence).unsqueeze(0)
 
 
+def _filter_topics_by_subject(topics, subject: str | None = None):
+    """Filter generic topics and optionally restrict results to one subject."""
+    filtered = []
+
+    for item in topics:
+        topic = item.get("topic", "")
+        topic_subject = item.get("subject", "")
+
+        if not _is_valid_topic(topic):
+            continue
+
+        if subject and _normalize(topic_subject) != _normalize(subject):
+            continue
+
+        filtered.append(item)
+
+    return filtered
+
+
 def get_weak_topics_lstm(
     student_id: str,
     subject: str | None = None,
 ):
-    """
-    Predict weak topics using DKT.
-
-    Falls back to the EMA tracker when DKT cannot be used.
-    Optionally filters results by subject.
-    """
     loaded = _load_model_and_vocab()
 
     if loaded is None:
-        return get_weak_topics(student_id, subject=subject)
+        return _filter_topics_by_subject(
+            get_weak_topics(student_id, subject=subject),
+            subject,
+        )
 
     model, vocab = loaded
     interactions = _get_interactions(student_id)
 
     if len(interactions) < _MIN_INTERACTIONS_FOR_LSTM:
-        return get_weak_topics(student_id, subject=subject)
+        return _filter_topics_by_subject(
+            get_weak_topics(student_id, subject=subject),
+            subject,
+        )
 
     x = _encode_interactions(interactions, vocab)
 
     if x is None:
-        return get_weak_topics(student_id, subject=subject)
+        return _filter_topics_by_subject(
+            get_weak_topics(student_id, subject=subject),
+            subject,
+        )
 
     with torch.no_grad():
         predictions = model(x)
 
     latest = predictions[0, -1]
-
     weak_topics = []
 
     for topic_subject, topic, idx in vocab.all_topics():
 
-        if subject and topic_subject.lower() != subject.lower():
+        if not _is_valid_topic(topic):
+            continue
+
+        if subject and _normalize(topic_subject) != _normalize(subject):
             continue
 
         mastery = float(latest[idx])
 
         if mastery < WEAK_TOPIC_THRESHOLD:
-            weak_topics.append(
-                {
-                    "subject": topic_subject,
-                    "topic": topic,
-                    "mastery_score": round(mastery, 2),
-                }
-            )
+            weak_topics.append({
+                "subject": topic_subject,
+                "topic": topic,
+                "mastery_score": round(mastery, 2),
+            })
 
     return sorted(
         weak_topics,

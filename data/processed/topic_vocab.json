@@ -1,5 +1,8 @@
 {
   "math::quadratic equations": 0,
   "science::chemical reactions": 1,
-  "science::photosynthesis": 2
+  "science::photosynthesis": 2,
+  "mathematics::algebra": 3,
+  "science::science": 4,
+  "mathematics::mathematics": 5
 }

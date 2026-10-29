@@ -1,31 +1,27 @@
+
 """
-Trains the DKT (Deep Knowledge Tracing) LSTM on logged student
-interactions.
+Trains the DKT (Deep Knowledge Tracing) LSTM using student
+interaction history stored in MongoDB Atlas.
 
-Data reality check: DKT-style models are normally trained on thousands of
-students and tens of thousands of interactions (the original paper used
-~4,000 students). With a small pilot, this script will run and produce a
-model, but treat its predictions as experimental rather than authoritative
-until real usage data accumulates. This is exactly why
-sequence_tracker.py falls back to the simpler EMA tracker below a minimum
-interaction count, rather than trusting an undertrained LSTM blindly.
-
-Usage:
-    python scripts/train_lstm.py
+The LSTM remains experimental until sufficient real student
+interaction data is collected.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from common.config import DATA_PROCESSED_DIR, configure_logging
-from personalization_layer.database import get_session
+from personalization_layer.mongodb import (
+    students_collection,
+    interaction_logs_collection,
+)
 from personalization_layer.lstm_model import DKTModel
-from personalization_layer.models import InteractionLog, Student
 from personalization_layer.topic_vocab import TopicVocab
 
 configure_logging()
@@ -41,34 +37,47 @@ def _load_all_sequences() -> tuple[list[list[tuple[str, str, bool]]], TopicVocab
     vocab = TopicVocab()
     sequences = []
 
-    with get_session() as session:
-        student_ids = [s.id for s in session.query(Student).all()]
+    student_ids = [
+        student["_id"]
+        for student in students_collection.find({}, {"_id": 1})
+    ]
 
-        for student_id in student_ids:
-            rows = (
-                session.query(InteractionLog)
-                .filter_by(student_id=student_id)
-                .order_by(InteractionLog.created_at.asc())
-                .all()
+    logger.info("Found %d students in MongoDB.", len(student_ids))
+
+    for student_id in student_ids:
+        rows = interaction_logs_collection.find(
+            {"student_id": student_id},
+            {
+                "_id": 0,
+                "subject": 1,
+                "topic": 1,
+                "correct": 1,
+                "created_at": 1,
+            },
+        ).sort("created_at", 1)
+
+        sequence = [
+            (row["subject"], row["topic"], bool(row["correct"]))
+            for row in rows
+        ]
+
+        for subject, topic, _ in sequence:
+            vocab.index_for(
+                subject,
+                topic,
+                create_if_missing=True,
             )
 
-            sequence = [(r.subject, r.topic, r.correct) for r in rows]
-
-            for subject, topic, _ in sequence:
-                vocab.index_for(subject, topic, create_if_missing=True)
-
-            if len(sequence) >= 2:
-                sequences.append(sequence)
+        if len(sequence) >= 2:
+            sequences.append(sequence)
 
     vocab.save()
+
     return sequences, vocab
 
 
 class InteractionSequenceDataset(Dataset):
-    """Each item is one student's full interaction sequence, encoded as
-    (input, target) pairs: DKT predicts the NEXT interaction's correctness
-    from everything seen so far.
-    """
+    """Each item represents one student's interaction sequence."""
 
     def __init__(
         self,
@@ -85,7 +94,9 @@ class InteractionSequenceDataset(Dataset):
     def __getitem__(self, idx: int):
         sequence = self.sequences[idx]
 
-        input_steps, target_indices, target_correct = [], [], []
+        input_steps = []
+        target_indices = []
+        target_correct = []
 
         for subject, topic, correct in sequence[:-1]:
             index = self.vocab.index_for(
@@ -116,9 +127,6 @@ class InteractionSequenceDataset(Dataset):
 
 
 def _collate(batch):
-    # Sequence length varies per student, and loss is computed per-sample
-    # below, so no padding is needed — batch size is kept at 1, which is
-    # perfectly fine at pilot scale (a few dozen students at most).
     return batch[0]
 
 
@@ -127,14 +135,18 @@ def main() -> None:
 
     if not sequences:
         logger.warning(
-            "No logged interactions found — have students used the system yet? "
-            "Nothing to train on."
+            "No student sequences with at least two interactions "
+            "were found in MongoDB. Nothing to train on."
         )
         return
 
+    total_interactions = sum(len(sequence) for sequence in sequences)
+
     logger.info(
-        "Training on %d student sequences across %d topics.",
+        "Training on %d student sequences, %d interactions, "
+        "and %d topics.",
         len(sequences),
+        total_interactions,
         len(vocab),
     )
 
@@ -158,7 +170,6 @@ def main() -> None:
     )
 
     loss_fn = nn.BCELoss()
-
     model.train()
 
     for epoch in range(1, _EPOCHS + 1):
@@ -188,7 +199,7 @@ def main() -> None:
             total_loss += loss.item()
 
         logger.info(
-            "Epoch %d/%d — loss: %.4f",
+            "Epoch %d/%d - loss: %.4f",
             epoch,
             _EPOCHS,
             total_loss / max(len(loader), 1),
@@ -201,10 +212,7 @@ def main() -> None:
         _MODEL_PATH,
     )
 
-    logger.info(
-        "Model saved to %s",
-        _MODEL_PATH,
-    )
+    logger.info("Model saved to %s", _MODEL_PATH)
 
 
 if __name__ == "__main__":

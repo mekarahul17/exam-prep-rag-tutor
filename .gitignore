@@ -53,3 +53,19 @@ node_modules/
 # Frontend build output
 frontend/dist/
 client/dist/
+
+
+# Backup and temporary files
+*_backup.py
+*.zip
+check_*.py
+
+# Python environment and generated files
+__pycache__/
+.pytest_cache/
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Local development databases
+*.db
