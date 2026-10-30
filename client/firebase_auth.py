@@ -1,9 +1,13 @@
+
+import logging
+
 import firebase_admin
 from firebase_admin import auth, credentials
 from fastapi import Header, HTTPException
 
-
 PROJECT_ID = "taskflow-app-e6571"
+
+logger = logging.getLogger(__name__)
 
 
 def get_firebase_app():
@@ -35,14 +39,20 @@ def verify_firebase_token(
         )
 
     try:
-        get_firebase_app()
+        app = get_firebase_app()
+
         decoded_token = auth.verify_id_token(
             token,
-            check_revoked=True
+            app=app,
+            check_revoked=True,
+            clock_skew_seconds=5
         )
+
         return decoded_token
 
     except Exception:
+        logger.exception("Firebase ID token verification failed")
+
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired authentication token"

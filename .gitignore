@@ -1,71 +1,49 @@
-
 # Environment variables and secrets
 .env
 .env.*
 !.env.example
 
-# Python virtual environments
-venv/
-.venv/
-env/
-
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
+venv/
+.venv/
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
+# Node
+node_modules/
+dist/
 
-# Local databases
-*.db
-*.sqlite
-*.sqlite3
+# Logs and temporary files
+*.log
+temp/
+tmp/
 
-# Exclude original NCERT datasets
-data/raw/ncert/
-
-# Exclude generated vector database
-data/processed/vector_store/
+# System files
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
 .idea/
 
-# Operating system files
-.DS_Store
-Thumbs.db
-desktop.ini
 
-# Logs and temporary files
-*.log
-*.tmp
-*.bak
-
-# Build files
-build/
-dist/
-
-# Node.js dependencies
-node_modules/
-
-# Frontend build output
-frontend/dist/
-client/dist/
-
-
-# Backup and temporary files
-*_backup.py
-*.zip
-check_*.py
-
-# Python environment and generated files
-__pycache__/
-.pytest_cache/
-
-# Frontend dependencies
-frontend/node_modules/
-
-# Local development databases
+# Local databases and backups
 *.db
+*.sqlite
+*.sqlite3
+*_backup.*
+
+# Temporary project backups
+client/app_backup*.py
+
+# Local test artifacts
+adaptive_analytics_review.zip
+
+# NCERT source files and generated vector database
+data/raw/ncert/
+data/processed/vector_store/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3

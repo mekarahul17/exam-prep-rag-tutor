@@ -79,13 +79,17 @@ function App({ user }) {
     return () => URL.revokeObjectURL(previewUrl)
   }, [selectedImage])
 
-  async function apiRequest(url, options = {}) {
-    if (!user) {
-      throw new Error('You must be signed in to use ExamPrep AI.')
-    }
+  
+async function apiRequest(url, options = {}) {
+  // Always use the latest authenticated Firebase user.
+  const currentUser = auth.currentUser || user;
 
-    // Get a fresh Firebase ID token for every protected API request.
-    const idToken = await user.getIdToken()
+  if (!currentUser) {
+    throw new Error('You must be signed in to use ExamPrep AI.');
+  }
+
+  async function sendRequest(forceRefresh = false) {
+    const idToken = await currentUser.getIdToken(forceRefresh);
 
     const response = await fetch(`${API}${url}`, {
       ...options,
@@ -93,15 +97,36 @@ function App({ user }) {
         ...(options.headers || {}),
         Authorization: `Bearer ${idToken}`,
       },
-    })
-    const data = await response.json()
+    });
 
-    if (!response.ok) {
-      throw new Error(data.detail || 'Something went wrong.')
+    let data = {};
+
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
     }
 
-    return data
+    return { response, data };
   }
+
+  // First attempt using the current Firebase token.
+  let { response, data } = await sendRequest(false);
+
+  // If authentication fails, refresh the token and retry once.
+  if (response.status === 401) {
+    ({ response, data } = await sendRequest(true));
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      data.detail || `Request failed with status ${response.status}`
+    );
+  }
+
+  return data;
+}
+
 
   async function loadConversations(search = '') {
     setHistoryLoading(true)
